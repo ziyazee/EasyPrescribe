@@ -1,7 +1,8 @@
 {
-  "name": "EasyPrescribe",
+  "name": "Clinic Rx - Doctor's Companion",
   "description": "A comprehensive prescription management system for doctors featuring patient records, smart medicine selection, and digital signature capabilities.",
   "requestFramePermissions": [
-    "camera"
+    "camera",
+    "microphone"
   ]
 }
