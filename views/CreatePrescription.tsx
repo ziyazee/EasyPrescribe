@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Patient, Medicine, Prescription } from '../types';
 import { GoogleGenAI, Type, Modality } from "@google/genai";
@@ -36,6 +36,17 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
 
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+  // Helper for safe base64 encoding (avoids stack limits)
+  const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+  };
+
   const suggestTreatment = async () => {
     if (!diagnosis) return;
     setIsAiLoading(true);
@@ -43,8 +54,7 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: `Suggest a treatment plan for a patient (${patient.age}y, ${patient.gender}) with diagnosis: ${diagnosis}. 
-                  Provide suggestions in JSON format with two keys: 
-                  "medicines" (array of objects with name, type, dosage, frequency, duration, timing) 
+                  Provide suggestions in JSON format with "medicines" (name, type, dosage, frequency, duration, timing) 
                   and "advice" (array of strings).`,
         config: {
           responseMimeType: "application/json",
@@ -78,7 +88,7 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
 
       const data = JSON.parse(response.text || '{}');
       if (data.medicines) {
-        const newMeds = data.medicines.map((m: any, i: number) => ({ ...m, id: Date.now() + i }));
+        const newMeds = data.medicines.map((m: any, i: number) => ({ ...m, id: `ai-${Date.now()}-${i}` }));
         setMedicines([...medicines, ...newMeds]);
       }
       if (data.advice) {
@@ -97,10 +107,8 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
     try {
       const response = await ai.models.generateContent({
         model: "gemini-3-pro-preview",
-        contents: `Search for the latest medical guidelines, dosages, and contraindications for: ${query}`,
-        config: {
-          tools: [{ googleSearch: {} }]
-        }
+        contents: `Latest medical guidelines and drug interactions for: ${query}`,
+        config: { tools: [{ googleSearch: {} }] }
       });
 
       const links = response.candidates?.[0]?.groundingMetadata?.groundingChunks
@@ -108,7 +116,7 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
         ?.map(chunk => ({ title: chunk.web.title, uri: chunk.web.uri })) || [];
 
       setSearchResults({
-        text: response.text || "No detailed info found.",
+        text: response.text || "No specific clinical guidelines found.",
         links: links.slice(0, 5)
       });
     } catch (err) {
@@ -116,6 +124,11 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
     } finally {
       setIsSearching(false);
     }
+  };
+
+  // Fix: Added missing removeMedicine function
+  const removeMedicine = (id: string) => {
+    setMedicines(prev => prev.filter(m => m.id !== id));
   };
 
   const startDictation = async () => {
@@ -138,10 +151,9 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
             const scriptProcessor = audioContextRef.current!.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
-              const l = inputData.length;
-              const int16 = new Int16Array(l);
-              for (let i = 0; i < l; i++) int16[i] = inputData[i] * 32768;
-              const base64 = btoa(String.fromCharCode(...new Uint8Array(int16.buffer)));
+              const int16 = new Int16Array(inputData.length);
+              for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
+              const base64 = arrayBufferToBase64(int16.buffer);
               sessionPromise.then(s => s.sendRealtimeInput({ media: { data: base64, mimeType: 'audio/pcm;rate=16000' } }));
             };
             source.connect(scriptProcessor);
@@ -149,9 +161,11 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
           },
           onmessage: (msg) => {
             if (msg.serverContent?.outputTranscription) {
-              setCustomNotes(prev => prev + " " + msg.serverContent!.outputTranscription!.text);
+              setCustomNotes(prev => prev + (prev ? " " : "") + msg.serverContent!.outputTranscription!.text);
             }
-          }
+          },
+          onclose: () => setIsDictating(false),
+          onerror: () => setIsDictating(false)
         },
         config: { 
           responseModalities: [Modality.AUDIO],
@@ -167,7 +181,7 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
 
   const handleSave = () => {
     const newPrescription: Prescription = {
-      id: `RX-${Math.floor(Math.random() * 10000)}`,
+      id: `RX-${Math.floor(Math.random() * 90000 + 10000)}`,
       patient,
       diagnosis,
       medicines,
@@ -189,194 +203,196 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
     navigate('/prescription/preview');
   };
 
-  const removeMedicine = (id: string) => setMedicines(medicines.filter(m => m.id !== id));
-
   return (
     <div className="min-h-screen bg-background-light flex flex-col font-display">
       <header className="flex items-center justify-between border-b border-neutral-border bg-white px-6 py-3 sticky top-0 z-30 shadow-sm">
         <div className="flex items-center gap-4 cursor-pointer" onClick={() => navigate('/dashboard')}>
-          <div className="size-10 bg-primary/10 rounded-lg flex items-center justify-center text-primary">
-            <span className="material-symbols-outlined text-3xl">local_hospital</span>
+          <div className="size-10 bg-primary/10 rounded-lg flex items-center justify-center text-primary shadow-inner">
+            <span className="material-symbols-outlined text-2xl font-bold">local_hospital</span>
           </div>
-          <h2 className="text-xl font-bold tracking-tight">Clinic Rx</h2>
+          <h2 className="text-xl font-bold tracking-tight text-primary">Clinic Rx</h2>
         </div>
         <div className="flex items-center gap-4">
           <button 
             onClick={startDictation}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${isDictating ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+            className={`flex items-center gap-2 px-4 py-2 rounded-full transition-all duration-300 shadow-sm border ${isDictating ? 'bg-red-500 text-white border-red-600 scale-105' : 'bg-white text-gray-700 border-neutral-border hover:border-primary/50'}`}
           >
-            <span className="material-symbols-outlined">{isDictating ? 'mic' : 'mic_none'}</span>
-            <span className="text-sm font-bold">{isDictating ? 'Dictating...' : 'Voice Scribe'}</span>
+            <span className={`material-symbols-outlined text-xl ${isDictating ? 'animate-pulse fill-1' : ''}`}>
+              {isDictating ? 'graphic_eq' : 'mic_none'}
+            </span>
+            <span className="text-sm font-bold">{isDictating ? 'Transcribing...' : 'Voice Dictation'}</span>
           </button>
-          <img src="https://picsum.photos/seed/doc1/100/100" className="size-10 rounded-full border-2 border-primary/20" alt="Doctor" />
+          <div className="h-10 w-px bg-neutral-border mx-2"></div>
+          <div className="flex items-center gap-3">
+            <div className="text-right hidden sm:block">
+              <p className="text-xs font-bold leading-none">Dr. Sarah Mitchell</p>
+              <p className="text-[10px] text-text-secondary uppercase tracking-tighter">General Physician</p>
+            </div>
+            <img src="https://picsum.photos/seed/doc1/100/100" className="size-10 rounded-full border-2 border-primary/20 hover:border-primary transition-colors cursor-pointer" alt="Doctor" />
+          </div>
         </div>
       </header>
 
       <main className="flex-grow flex flex-col lg:flex-row gap-6 p-4 md:p-6 max-w-[1600px] mx-auto w-full relative">
         <div className="flex flex-col gap-6 flex-[2] min-w-0">
-          <section className="bg-white rounded-xl shadow-sm border border-neutral-border p-5">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary">person_add</span>
-                <h3 className="text-lg font-bold">Patient Details</h3>
-              </div>
+          <section className="bg-white rounded-xl shadow-soft border border-neutral-border p-6">
+            <div className="flex items-center gap-2 mb-6">
+              <span className="material-symbols-outlined text-primary bg-primary-light p-1.5 rounded-lg text-xl">person_search</span>
+              <h3 className="text-lg font-bold">Patient Information</h3>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="md:col-span-2">
-                <label className="text-xs font-semibold text-text-secondary uppercase mb-1 block">Full Name</label>
-                <input type="text" value={patient.name} onChange={e => setPatient({...patient, name: e.target.value})} className="w-full rounded-lg border-neutral-border bg-gray-50 py-2 text-sm focus:ring-primary" />
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="md:col-span-2 space-y-1">
+                <label className="text-[10px] font-bold text-text-secondary uppercase tracking-widest px-1">Full Patient Name</label>
+                <input type="text" value={patient.name} onChange={e => setPatient({...patient, name: e.target.value})} className="w-full rounded-lg border-neutral-border bg-gray-50/50 py-2.5 px-4 text-sm focus:ring-primary focus:bg-white transition-all" />
               </div>
-              <div>
-                <label className="text-xs font-semibold text-text-secondary uppercase mb-1 block">Age</label>
-                <input type="number" value={patient.age} onChange={e => setPatient({...patient, age: e.target.value})} className="w-full rounded-lg border-neutral-border bg-gray-50 py-2 text-sm focus:ring-primary" />
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-text-secondary uppercase tracking-widest px-1">Age</label>
+                <input type="number" value={patient.age} onChange={e => setPatient({...patient, age: e.target.value})} className="w-full rounded-lg border-neutral-border bg-gray-50/50 py-2.5 px-4 text-sm focus:ring-primary focus:bg-white transition-all" />
               </div>
-              <div>
-                <label className="text-xs font-semibold text-text-secondary uppercase mb-1 block">Gender</label>
-                <select value={patient.gender} onChange={e => setPatient({...patient, gender: e.target.value as any})} className="w-full rounded-lg border-neutral-border bg-gray-50 py-2 text-sm focus:ring-primary">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-text-secondary uppercase tracking-widest px-1">Gender</label>
+                <select value={patient.gender} onChange={e => setPatient({...patient, gender: e.target.value as any})} className="w-full rounded-lg border-neutral-border bg-gray-50/50 py-2.5 px-4 text-sm focus:ring-primary focus:bg-white transition-all">
                   <option>Male</option><option>Female</option><option>Other</option>
                 </select>
               </div>
             </div>
           </section>
 
-          <section className="bg-white rounded-xl shadow-sm border border-neutral-border p-5">
-            <div className="flex items-center justify-between mb-4">
+          <section className="bg-white rounded-xl shadow-soft border border-neutral-border p-6">
+            <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary">medication</span>
-                <h3 className="text-lg font-bold">Diagnosis & AI Suggestions</h3>
+                <span className="material-symbols-outlined text-primary bg-primary-light p-1.5 rounded-lg text-xl">psychology</span>
+                <h3 className="text-lg font-bold">Clinical Diagnosis</h3>
               </div>
             </div>
             
-            <div className="flex gap-4 mb-6">
+            <div className="flex flex-col sm:flex-row gap-3">
               <div className="flex-grow relative">
                 <input 
                   type="text" 
                   value={diagnosis}
                   onChange={e => setDiagnosis(e.target.value)}
-                  placeholder="Enter diagnosis (e.g., Acute Migraine)" 
-                  className="w-full rounded-lg border-neutral-border bg-gray-50 pl-10 py-3 text-sm focus:ring-primary"
+                  placeholder="Enter diagnosis (e.g., Type 2 Diabetes)" 
+                  className="w-full rounded-lg border-neutral-border bg-gray-50 pl-11 py-3 text-sm focus:ring-primary focus:bg-white transition-all shadow-inner"
                 />
                 <span className="material-symbols-outlined absolute left-3 top-3 text-gray-400">stethoscope</span>
               </div>
               <button 
                 onClick={suggestTreatment}
                 disabled={isAiLoading || !diagnosis}
-                className={`flex items-center gap-2 px-6 py-2 rounded-lg font-bold transition-all ${isAiLoading ? 'bg-primary/20 text-primary cursor-not-allowed' : 'bg-primary text-white hover:bg-primary-hover shadow-md'}`}
+                className={`flex items-center justify-center gap-2 px-6 py-3 rounded-lg font-bold transition-all ${isAiLoading ? 'bg-primary/20 text-primary animate-pulse' : 'bg-primary text-white hover:bg-primary-hover shadow-md active:scale-95'}`}
               >
-                {isAiLoading ? (
-                  <span className="animate-spin material-symbols-outlined text-lg">sync</span>
-                ) : (
-                  <span className="material-symbols-outlined text-lg">auto_awesome</span>
-                )}
-                {isAiLoading ? 'Analyzing...' : 'Suggest Treatment'}
+                <span className={`material-symbols-outlined text-lg ${isAiLoading ? 'animate-spin' : ''}`}>
+                  {isAiLoading ? 'sync' : 'auto_awesome'}
+                </span>
+                {isAiLoading ? 'Analyzing...' : 'AI Suggest Treatment'}
               </button>
-            </div>
-
-            <div className="flex flex-wrap gap-2 mb-4">
-              <span className="text-xs font-bold text-gray-400 uppercase tracking-widest w-full">Quick Search Drugs:</span>
-              {['Paracetamol', 'Amoxicillin', 'Metformin', 'Atorvastatin'].map((drug) => (
-                <button 
-                  key={drug} 
-                  onClick={() => searchDrugInfo(drug)}
-                  className="text-xs px-3 py-1.5 border border-neutral-border rounded-lg bg-white hover:bg-gray-50 hover:border-primary transition-all flex items-center gap-1"
-                >
-                  <span className="material-symbols-outlined text-sm">search</span>
-                  {drug}
-                </button>
-              ))}
             </div>
           </section>
 
-          <section className="bg-white rounded-xl shadow-sm border border-neutral-border overflow-hidden">
-            <div className="px-5 py-3 border-b border-neutral-border bg-gray-50 flex justify-between items-center">
-              <h3 className="text-sm font-bold text-gray-700 uppercase">Prescription Table</h3>
-              <span className="text-xs text-text-secondary">{medicines.length} Medicines added</span>
+          <section className="bg-white rounded-xl shadow-soft border border-neutral-border overflow-hidden">
+            <div className="px-6 py-4 border-b border-neutral-border bg-gray-50 flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-gray-500">list_alt</span>
+                <h3 className="text-sm font-bold text-gray-700 uppercase tracking-tight">Prescription Details</h3>
+              </div>
+              <span className="bg-primary/10 text-primary text-[10px] font-bold px-2 py-0.5 rounded-full">{medicines.length} Medicines</span>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm whitespace-nowrap">
-                <thead className="bg-gray-100 text-text-secondary font-semibold border-b border-neutral-border">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-gray-100 text-text-secondary font-bold border-b border-neutral-border">
                   <tr>
-                    <th className="px-5 py-3">Medicine Name</th>
-                    <th className="px-2 py-3 text-center">M-A-N</th>
-                    <th className="px-5 py-3">Days</th>
-                    <th className="px-5 py-3">Timing</th>
-                    <th className="px-5 py-3">Actions</th>
+                    <th className="px-6 py-4">Medicine & Type</th>
+                    <th className="px-2 py-4 text-center">Dosage (M-A-N)</th>
+                    <th className="px-6 py-4">Duration</th>
+                    <th className="px-6 py-4">Instructions</th>
+                    <th className="px-6 py-4 text-right"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {medicines.length === 0 && (
+                  {medicines.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-5 py-10 text-center text-gray-400 italic">
-                        No medicines added yet. Use AI suggestions or search above.
+                      <td colSpan={5} className="px-6 py-12 text-center text-gray-400 italic">
+                        No medicines prescribed. Click "AI Suggest" for a treatment plan.
                       </td>
                     </tr>
-                  )}
-                  {medicines.map((m) => (
-                    <tr key={m.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-5 py-3">
-                        <div className="font-bold flex items-center gap-2">
-                          {m.name}
-                          <button onClick={() => searchDrugInfo(m.name)} className="text-primary hover:text-primary-hover">
-                            <span className="material-symbols-outlined text-sm">info</span>
+                  ) : (
+                    medicines.map((m) => (
+                      <tr key={m.id} className="hover:bg-primary/5 transition-colors group">
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-gray-900">{m.name}</span>
+                            <button 
+                              onClick={() => searchDrugInfo(m.name)} 
+                              className="text-primary opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-primary/10 rounded"
+                              title="Search guidelines"
+                            >
+                              <span className="material-symbols-outlined text-sm">help_outline</span>
+                            </button>
+                          </div>
+                          <div className="text-[11px] text-text-secondary font-medium">{m.type} • {m.dosage}</div>
+                        </td>
+                        <td className="px-2 py-4 text-center">
+                          <span className="font-mono bg-white border border-primary/20 px-3 py-1 rounded-md text-primary font-bold shadow-sm">{m.frequency}</span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className="text-gray-700 font-medium">{m.duration}</span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-1.5 text-gray-600 italic">
+                            <span className="material-symbols-outlined text-[14px]">restaurant</span>
+                            {m.timing}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button onClick={() => removeMedicine(m.id)} className="text-gray-300 hover:text-red-500 transition-colors p-1.5 rounded-lg hover:bg-red-50">
+                            <span className="material-symbols-outlined text-xl">delete_sweep</span>
                           </button>
-                        </div>
-                        <div className="text-xs text-text-secondary">{m.type} • {m.dosage}</div>
-                      </td>
-                      <td className="px-2 py-3 text-center">
-                        <span className="font-mono bg-primary/5 px-2 py-1 rounded text-primary">{m.frequency}</span>
-                      </td>
-                      <td className="px-5 py-3">
-                        <input type="text" value={m.duration} onChange={() => {}} className="w-20 rounded border-neutral-border py-1 text-sm bg-transparent" />
-                      </td>
-                      <td className="px-5 py-3">
-                        <select className="rounded border-neutral-border py-1 text-sm w-32 bg-transparent">
-                          <option>{m.timing}</option>
-                          <option>After Food</option><option>Before Food</option>
-                        </select>
-                      </td>
-                      <td className="px-5 py-3 text-right">
-                        <button onClick={() => removeMedicine(m.id)} className="text-gray-400 hover:text-red-500 transition-colors">
-                          <span className="material-symbols-outlined">delete</span>
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
           </section>
         </div>
 
-        <div className={`flex flex-col gap-6 flex-1 min-w-[320px] transition-all duration-300 ${showSearchPanel ? 'lg:translate-x-0' : 'lg:translate-x-4'}`}>
-          <section className="bg-white rounded-xl shadow-sm border border-neutral-border p-5 flex-grow">
-            <div className="flex items-center gap-2 mb-4">
-              <span className="material-symbols-outlined text-primary">restaurant</span>
-              <h3 className="text-lg font-bold">Clinical Advice & Notes</h3>
+        <div className={`flex flex-col gap-6 flex-1 min-w-[340px] transition-all duration-500 ${showSearchPanel ? 'opacity-100' : 'opacity-100'}`}>
+          <section className="bg-white rounded-xl shadow-soft border border-neutral-border p-6 flex flex-col min-h-[400px]">
+            <div className="flex items-center gap-2 mb-6 border-b border-gray-100 pb-3">
+              <span className="material-symbols-outlined text-primary">edit_note</span>
+              <h3 className="text-lg font-bold">Clinical Advice</h3>
             </div>
-            <div className="border-t border-gray-100 pt-4">
-              <ul className="space-y-2 mb-4">
+            
+            <div className="flex-grow space-y-4">
+              <ul className="space-y-2">
                 {advice.map((a, i) => (
-                  <li key={i} className="flex items-center gap-2 text-sm text-gray-700 bg-gray-50 p-2 rounded-lg group">
-                    <span className="material-symbols-outlined text-primary text-base">check_circle</span>
-                    <span className="flex-grow">{a}</span>
-                    <button onClick={() => setAdvice(advice.filter((_, idx) => idx !== i))} className="text-gray-400 hover:text-red-500">
-                      <span className="material-symbols-outlined text-base">close</span>
+                  <li key={i} className="flex items-start gap-3 text-sm text-gray-700 bg-gray-50 p-3 rounded-lg border border-transparent hover:border-primary/20 transition-all group shadow-sm">
+                    <span className="material-symbols-outlined text-primary text-lg mt-0.5">verified</span>
+                    <span className="flex-grow leading-relaxed">{a}</span>
+                    <button onClick={() => setAdvice(advice.filter((_, idx) => idx !== i))} className="text-gray-300 hover:text-red-400 transition-colors">
+                      <span className="material-symbols-outlined text-lg">close</span>
                     </button>
                   </li>
                 ))}
               </ul>
-              <div className="relative">
+              
+              <div className="relative group">
                 <textarea 
                   value={customNotes}
                   onChange={e => setCustomNotes(e.target.value)}
-                  className={`w-full rounded-lg border-neutral-border bg-gray-50 text-sm h-48 p-4 focus:ring-primary transition-all ${isDictating ? 'ring-2 ring-red-500 bg-red-50/10' : ''}`} 
-                  placeholder={isDictating ? "Listening and transcribing..." : "Additional clinical notes or dictated advice..."}
+                  className={`w-full rounded-xl border-neutral-border bg-gray-50/50 text-sm h-64 p-5 focus:ring-primary focus:bg-white transition-all shadow-inner leading-relaxed ${isDictating ? 'ring-2 ring-red-500 shadow-primary-glow' : ''}`} 
+                  placeholder={isDictating ? "AI Scribe is listening..." : "Additional notes or dictated clinical observations..."}
                 ></textarea>
                 {isDictating && (
-                  <div className="absolute top-2 right-2 flex gap-1">
-                    <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-bounce"></div>
-                    <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-bounce delay-100"></div>
-                    <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-bounce delay-200"></div>
+                  <div className="absolute top-4 right-4 flex items-center gap-2 bg-red-50 px-3 py-1.5 rounded-full border border-red-100">
+                    <div className="flex gap-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-bounce"></div>
+                      <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-bounce delay-100"></div>
+                      <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-bounce delay-200"></div>
+                    </div>
+                    <span className="text-[10px] font-bold text-red-600 uppercase">Live</span>
                   </div>
                 )}
               </div>
@@ -384,33 +400,36 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
           </section>
 
           {showSearchPanel && searchResults && (
-            <section className="bg-primary/5 rounded-xl border border-primary/20 p-5 shadow-inner">
-              <div className="flex justify-between items-center mb-3">
-                <h4 className="text-sm font-bold text-primary flex items-center gap-2">
-                  <span className="material-symbols-outlined">verified_user</span>
-                  Drug Information (Grounded)
+            <section className="bg-white rounded-xl shadow-soft border border-primary/20 p-6 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-1 h-full bg-primary"></div>
+              <div className="flex justify-between items-center mb-4">
+                <h4 className="text-xs font-bold text-primary uppercase tracking-widest flex items-center gap-2">
+                  <span className="material-symbols-outlined text-lg">verified_user</span>
+                  Medical Grounding
                 </h4>
-                <button onClick={() => setShowSearchPanel(false)} className="text-primary hover:bg-primary/10 rounded">
-                  <span className="material-symbols-outlined">close</span>
+                <button onClick={() => setShowSearchPanel(false)} className="text-gray-400 hover:text-primary transition-colors">
+                  <span className="material-symbols-outlined text-xl">close</span>
                 </button>
               </div>
-              <div className="text-xs text-gray-700 leading-relaxed max-h-48 overflow-y-auto pr-2 mb-4 custom-scrollbar">
+              
+              <div className="text-xs text-gray-700 leading-relaxed mb-6 bg-gray-50 p-4 rounded-lg border border-gray-100 max-h-48 overflow-y-auto custom-scrollbar">
                 {isSearching ? (
-                  <div className="space-y-2 animate-pulse">
-                    <div className="h-4 bg-primary/10 rounded w-3/4"></div>
-                    <div className="h-4 bg-primary/10 rounded w-full"></div>
-                    <div className="h-4 bg-primary/10 rounded w-1/2"></div>
+                  <div className="space-y-3">
+                    <div className="h-3 shimmer rounded w-full"></div>
+                    <div className="h-3 shimmer rounded w-5/6"></div>
+                    <div className="h-3 shimmer rounded w-4/6"></div>
                   </div>
                 ) : (
                   searchResults.text
                 )}
               </div>
-              <div className="space-y-2 border-t border-primary/10 pt-3">
-                <span className="text-[10px] uppercase font-bold text-primary/60 tracking-tighter">Sources</span>
+              
+              <div className="space-y-2.5">
+                <p className="text-[10px] font-bold text-text-secondary uppercase tracking-tighter opacity-50">Referenced Clinical Sources</p>
                 {searchResults.links.map((link, i) => (
-                  <a key={i} href={link.uri} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-[11px] text-primary hover:underline truncate">
-                    <span className="material-symbols-outlined text-[14px]">link</span>
-                    {link.title}
+                  <a key={i} href={link.uri} target="_blank" rel="noreferrer" className="flex items-center gap-3 text-[11px] text-primary hover:text-primary-hover font-medium truncate bg-primary/5 p-2 rounded-lg border border-primary/5 hover:border-primary/20 transition-all">
+                    <img src={`https://www.google.com/s2/favicons?domain=${new URL(link.uri).hostname}&sz=32`} className="size-4 rounded-sm" alt="" />
+                    <span className="truncate">{link.title}</span>
                   </a>
                 ))}
               </div>
@@ -419,32 +438,31 @@ const CreatePrescription: React.FC<Props> = ({ onSave }) => {
         </div>
       </main>
 
-      <div className="sticky bottom-0 z-40 bg-white border-t border-neutral-border px-6 py-4 shadow-lg no-print">
+      <div className="sticky bottom-0 z-40 bg-white border-t border-neutral-border px-6 py-4 shadow-[0_-4px_15px_-3px_rgba(0,0,0,0.05)] no-print">
         <div className="max-w-[1600px] mx-auto flex flex-wrap justify-between items-center gap-4">
-          <div className="text-xs text-text-secondary flex items-center gap-2">
-            <span className="material-symbols-outlined text-base animate-pulse text-green-500">cloud_done</span>
-            Draft auto-saved at {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 bg-green-50 text-green-700 px-3 py-1.5 rounded-full border border-green-100">
+              <span className="material-symbols-outlined text-sm font-bold">check_circle</span>
+              <span className="text-[11px] font-bold uppercase tracking-tight">Draft Secured</span>
+            </div>
+            <span className="text-[11px] text-text-secondary font-medium">Auto-saved at {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
           </div>
-          <div className="flex gap-3">
-            <button onClick={() => navigate('/dashboard')} className="px-6 py-2.5 rounded-lg text-text-main font-medium text-sm hover:bg-gray-50 transition-colors">
-              Cancel
+          
+          <div className="flex gap-4">
+            <button onClick={() => navigate('/dashboard')} className="px-6 py-2.5 text-text-secondary font-bold text-sm hover:text-text-main transition-colors">
+              Discard
             </button>
-            <button onClick={handleSave} className="flex items-center gap-2 px-6 py-2.5 rounded-lg border border-neutral-border text-text-main font-bold text-sm hover:bg-gray-50 transition-colors">
+            <button onClick={handleSave} className="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-neutral-border bg-white text-text-main font-bold text-sm hover:bg-gray-50 hover:border-primary/40 transition-all shadow-sm">
               <span className="material-symbols-outlined text-lg">visibility</span>
-              Preview Rx
+              Full Preview
             </button>
-            <button onClick={handleSave} className="flex items-center gap-2 px-8 py-2.5 rounded-lg bg-primary text-white font-bold text-sm hover:bg-primary-hover shadow-lg transition-all active:scale-95">
-              <span className="material-symbols-outlined text-lg">print</span>
-              Save & Print
+            <button onClick={handleSave} className="flex items-center gap-2 px-10 py-2.5 rounded-xl bg-primary text-white font-bold text-sm hover:bg-primary-hover shadow-lg shadow-primary/20 transition-all active:scale-95 group">
+              <span className="material-symbols-outlined text-lg group-hover:rotate-12 transition-transform">print</span>
+              Print Prescription
             </button>
           </div>
         </div>
       </div>
-      <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #1f7a5c44; border-radius: 10px; }
-      `}</style>
     </div>
   );
 };
